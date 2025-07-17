@@ -14,17 +14,20 @@ load_dotenv()
 
 app = FastAPI(title="AI Movie Search Assistant")
 
+# Get allowed origins from environment or use defaults
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "").split(",") if os.getenv("ALLOWED_ORIGINS") else [
+    "http://localhost:5173",      # Vite default port
+    "http://localhost:4173",      # Vite preview port
+    "http://localhost:8080",      # Custom frontend port
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:4173",
+    "http://127.0.0.1:8080",
+]
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",      # Vite default port
-        "http://localhost:4173",      # Vite preview port
-        "http://localhost:8080",      # Custom frontend port
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:4173",
-        "http://127.0.0.1:8080",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
