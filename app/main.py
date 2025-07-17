@@ -171,7 +171,8 @@ async def root():
                 }
                 
                 let html = '<div class="result">';
-                html += `<h3>🔍 Search Query: <code>${data.tmdb_query}</code></h3>`;
+                html += `<h3>🔍 Search Type: <code>${data.search_params.search_type}</code></h3>`;
+                html += `<h4>📋 Parameters: <code>${JSON.stringify(data.search_params.params)}</code></h4>`;
                 html += `<p>Found ${data.movies.length} movies:</p>`;
                 
                 data.movies.forEach(movie => {
@@ -230,16 +231,16 @@ async def search_movies(query: SearchQuery):
         translator = QueryTranslator(openrouter_api_key)
         tmdb = TMDBService(tmdb_api_key)
         
-        # Translate natural language to TMDB query
-        tmdb_query = await translator.translate_query(query.query)
+        # Translate natural language to TMDB search parameters
+        search_params = await translator.translate_query(query.query)
         
         # Search movies using TMDB API
-        movies = await tmdb.search_movies(tmdb_query)
+        movies = await tmdb.search_movies(search_params)
         
         response_time_ms = int((time.time() - start_time) * 1000)
         
         return {
-            "tmdb_query": tmdb_query,
+            "search_params": search_params,
             "movies": movies,
             "total_count": len(movies),
             "response_time_ms": response_time_ms

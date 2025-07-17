@@ -1,16 +1,46 @@
 import httpx
 import json
 from typing import Dict, Any, Optional
+import re
 
 class QueryTranslator:
     def __init__(self, openrouter_api_key: str):
         self.api_key = openrouter_api_key
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
         
-    async def translate_query(self, natural_query: str) -> str:
+        # Genre mapping: name -> TMDB ID
+        self.genre_map = {
+            "action": 28,
+            "adventure": 12,
+            "animation": 16,
+            "comedy": 35,
+            "crime": 80,
+            "documentary": 99,
+            "drama": 18,
+            "family": 10751,
+            "fantasy": 14,
+            "history": 36,
+            "horror": 27,
+            "music": 10402,
+            "mystery": 9648,
+            "romance": 10749,
+            "science fiction": 878,
+            "sci-fi": 878,
+            "thriller": 53,
+            "war": 10752,
+            "western": 37
+        }
+        
+    async def translate_query(self, natural_query: str) -> Dict[str, Any]:
         """
-        Translate natural language query to TMDB search parameters
+        Translate natural language query to TMDB discover/search parameters
+        Returns dict with 'search_type' and 'params' keys
         """
+        
+        # Check if API key is available
+        if not self.api_key or self.api_key == "":
+            print("OpenRouter API key not set, using fallback rule-based translation")
+            return self._translate_with_rules(natural_query)
         
         # Try OpenRouter API first
         try:
@@ -20,31 +50,75 @@ class QueryTranslator:
             # Fallback to rule-based translation
             return self._translate_with_rules(natural_query)
     
-    async def _translate_with_ai(self, natural_query: str) -> str:
+    async def _translate_with_ai(self, natural_query: str) -> Dict[str, Any]:
         """Use OpenRouter AI for translation"""
-        system_prompt = """You are an expert at converting natural language movie search queries into TMDB (The Movie Database) API search parameters.
+        system_prompt = """You are an expert at converting natural language movie search queries into TMDB (The Movie Database) API parameters.
 
-Your task is to analyze the user's natural language query and return a simple search string that can be used with TMDB's search API.
+Your task is to analyze the user's natural language query and return search parameters in XML format.
 
-Guidelines:
-1. Extract key movie attributes: genre, year/decade, rating, actors, directors, keywords
-2. Focus on the most important search terms that will yield relevant results
-3. Keep it simple - TMDB search works best with straightforward queries
-4. If the query mentions specific movies, actors, or directors, prioritize those
-5. For genre/year combinations, include both in the search string
-6. For rating requirements, focus on the search terms and let filtering handle ratings
+Use this XML structure:
+<search>
+    <type>discover</type> <!-- or "search" -->
+    <params>
+        <param name="parameter_name">value</param>
+        <!-- additional params as needed -->
+    </params>
+</search>
+
+For "discover" type (use for genre, year, rating, actor filters):
+- with_genres: genre IDs (action=28, comedy=35, drama=18, horror=27, sci-fi=878, thriller=53, romance=10749, animation=16, crime=80, fantasy=14)
+- primary_release_year: YYYY format
+- vote_average.gte: minimum rating (1-10)
+- with_cast: person name for actor search
+- with_crew: person name for director search
+- sort_by: popularity.desc, vote_average.desc, release_date.desc
+
+For "search" type (use for specific movie titles):
+- query: exact movie title or partial title
 
 Examples:
-- "Action movies from the 90s" → "action 1990s"
-- "Sci-fi films with time travel" → "science fiction time travel"
-- "Movies starring Leonardo DiCaprio" → "Leonardo DiCaprio"
-- "Horror films from 2020" → "horror 2020"
-- "Romantic comedies with high ratings" → "romantic comedy"
-- "Marvel superhero movies" → "Marvel superhero"
 
-Return ONLY the search string, nothing else."""
+Input: "action movies from 2020"
+Output:
+<search>
+    <type>discover</type>
+    <params>
+        <param name="with_genres">28</param>
+        <param name="primary_release_year">2020</param>
+    </params>
+</search>
 
-        user_prompt = f"Convert this movie search query to TMDB search terms: {natural_query}"
+Input: "comedies with high ratings"
+Output:
+<search>
+    <type>discover</type>
+    <params>
+        <param name="with_genres">35</param>
+        <param name="vote_average.gte">7.5</param>
+    </params>
+</search>
+
+Input: "movies starring Tom Hanks"
+Output:
+<search>
+    <type>discover</type>
+    <params>
+        <param name="with_cast">Tom Hanks</param>
+    </params>
+</search>
+
+Input: "The Dark Knight"
+Output:
+<search>
+    <type>search</type>
+    <params>
+        <param name="query">The Dark Knight</param>
+    </params>
+</search>
+
+Return ONLY the XML, no other text or formatting."""
+
+        user_prompt = f"Convert this movie search query: {natural_query}"
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -54,88 +128,142 @@ Return ONLY the search string, nothing else."""
         }
         
         data = {
-            "model": "meta-llama/llama-3.1-8b-instruct:free",
+            "model": "google/gemini-2.0-flash-001",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
             "temperature": 0.3,
-            "max_tokens": 100
+            "max_tokens": 200
         }
         
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(self.base_url, headers=headers, json=data)
-            response.raise_for_status()
-            
-            result = response.json()
-            translated_query = result["choices"][0]["message"]["content"].strip()
-            
-            # Clean up the response - remove quotes and extra formatting
-            translated_query = translated_query.strip('"\'`')
-            
-            return translated_query
+            try:
+                response = await client.post(self.base_url, headers=headers, json=data)
+                response.raise_for_status()
+                
+                result = response.json()
+                ai_response = result["choices"][0]["message"]["content"].strip()
+                
+                # Parse XML response
+                try:
+                    parsed_result = self._parse_xml_response(ai_response)
+                    return self._validate_and_process_params(parsed_result)
+                except Exception as e:
+                    print(f"AI returned unparseable response: {ai_response}")
+                    print(f"Parse error: {e}")
+                    return self._translate_with_rules(natural_query)
+                    
+            except httpx.HTTPStatusError as e:
+                print(f"OpenRouter API HTTP error: {e.response.status_code} - {e.response.text}")
+                return self._translate_with_rules(natural_query)
+            except Exception as e:
+                print(f"OpenRouter API error: {str(e)}")
+                return self._translate_with_rules(natural_query)
     
-    def _translate_with_rules(self, natural_query: str) -> str:
+    def _parse_xml_response(self, xml_response: str) -> Dict[str, Any]:
+        """Parse XML response into structured parameters"""
+        # Extract search type
+        type_match = re.search(r'<type>(.*?)</type>', xml_response, re.DOTALL)
+        search_type = type_match.group(1).strip() if type_match else "search"
+        
+        # Extract parameters
+        params = {}
+        param_matches = re.findall(r'<param name="([^"]+)">(.*?)</param>', xml_response, re.DOTALL)
+        
+        for param_name, param_value in param_matches:
+            params[param_name.strip()] = param_value.strip()
+        
+        return {
+            "search_type": search_type,
+            "params": params
+        }
+    
+    def _validate_and_process_params(self, parsed_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and process AI-generated parameters"""
+        search_type = parsed_result.get("search_type", "search")
+        params = parsed_result.get("params", {})
+        
+        # Process genre names to IDs if needed
+        if "with_genres" in params:
+            genre_value = params["with_genres"]
+            if isinstance(genre_value, str) and not genre_value.isdigit():
+                # Convert genre name to ID
+                genre_name = genre_value.lower()
+                if genre_name in self.genre_map:
+                    params["with_genres"] = str(self.genre_map[genre_name])
+        
+        return {
+            "search_type": search_type,
+            "params": params
+        }
+    
+    def _translate_with_rules(self, natural_query: str) -> Dict[str, Any]:
         """Fallback rule-based translation"""
         query = natural_query.lower()
+        params = {}
+        search_type = "discover"
         
-        # Common movie search patterns
-        patterns = {
-            # Actors/Directors
-            r'(movies?\s+starring|starring|with)\s+([a-zA-Z\s]+)': r'\2',
-            r'(directed by|by director)\s+([a-zA-Z\s]+)': r'\2',
+        # Check for specific movie title patterns
+        if any(phrase in query for phrase in ["find movie", "movie called", "film called"]):
+            # Extract movie title
+            for phrase in ["find movie", "movie called", "film called"]:
+                if phrase in query:
+                    title = query.split(phrase)[-1].strip()
+                    return {
+                        "search_type": "search",
+                        "params": {"query": title}
+                    }
+        
+        # Genre detection (improved to catch more variations)
+        for genre_name, genre_id in self.genre_map.items():
+            if genre_name in query or f"{genre_name} movie" in query or f"{genre_name} film" in query:
+                params["with_genres"] = str(genre_id)
+                break
+        
+        # Year detection
+        year_match = re.search(r'\b(19|20)\d{2}\b', query)
+        if year_match:
+            params["primary_release_year"] = year_match.group()
+        
+        # Rating detection
+        if any(phrase in query for phrase in ["high rating", "good rating", "top rated", "best"]):
+            params["vote_average.gte"] = "7.5"
+        
+        # Actor detection
+        if "starring" in query or "with " in query:
+            # Simple actor name extraction (can be improved)
+            if "starring" in query:
+                actor_part = query.split("starring")[-1].strip()
+                actor_name = actor_part.split(" in ")[0].split(" from ")[0].strip()
+                if len(actor_name.split()) <= 3:  # Reasonable name length
+                    params["with_cast"] = actor_name.title()
+        
+        # If no specific parameters found, try keyword search
+        if not params:
+            # Extract meaningful keywords and try title search
+            words = query.split()
+            stop_words = {"the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "from", "movies", "films", "movie", "film", "search", "find", "show", "me"}
+            keywords = [word for word in words if word not in stop_words and len(word) > 2]
             
-            # Years/Decades
-            r'from\s+the\s+(\d{2})s': r'\1',
-            r'in\s+(\d{4})': r'\1',
-            r'(\d{4})\s+(movies?|films?)': r'\1',
-            
-            # Genres
-            r'action\s+(movies?|films?)': 'action',
-            r'horror\s+(movies?|films?)': 'horror',
-            r'comedy\s+(movies?|films?)': 'comedy',
-            r'romantic?\s+comed(y|ies)': 'romantic comedy',
-            r'sci-?fi': 'science fiction',
-            r'science\s+fiction': 'science fiction',
-            r'superhero': 'superhero',
-            r'marvel': 'marvel',
-            r'dc\s+comics?': 'dc',
-            
-            # Keywords
-            r'time\s+travel': 'time travel',
-            r'space': 'space',
-            r'alien': 'alien',
-            r'zombie': 'zombie',
-            r'vampire': 'vampire',
-            
-            # Ratings (remove these, focus on content)
-            r'(high|good|top)\s+rat(ed|ing)': '',
-            r'popular': '',
-            r'best': '',
-        }
+            if keywords:
+                # Use search endpoint with extracted keywords
+                search_query = " ".join(keywords[:3])  # Use first 3 meaningful words
+                return {
+                    "search_type": "search",
+                    "params": {"query": search_query}
+                }
+            else:
+                # Last resort: show popular movies
+                return {
+                    "search_type": "discover",
+                    "params": {
+                        "sort_by": "popularity.desc",
+                        "vote_count.gte": "200"
+                    }
+                }
         
-        import re
-        result_terms = []
-        
-        # Apply patterns
-        for pattern, replacement in patterns.items():
-            match = re.search(pattern, query)
-            if match:
-                if replacement.startswith('\\'):
-                    # Backreference
-                    term = re.sub(pattern, replacement, query).strip()
-                    if term:
-                        result_terms.append(term)
-                else:
-                    result_terms.append(replacement)
-        
-        # If no patterns matched, extract key words
-        if not result_terms:
-            # Remove common words and extract meaningful terms
-            stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'movies', 'films', 'movie', 'film'}
-            words = [word for word in query.split() if word not in stop_words and len(word) > 2]
-            result_terms = words[:3]  # Take first 3 meaningful words
-        
-        # Clean and join terms
-        final_query = ' '.join(result_terms).strip()
-        return final_query if final_query else natural_query 
+        return {
+            "search_type": search_type,
+            "params": params
+        } 
