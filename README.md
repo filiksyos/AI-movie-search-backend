@@ -1,5 +1,7 @@
 # AI Movie Search Backend
 
+https://github.com/user-attachments/assets/8f8776eb-42c1-444a-85ed-ada8cc7bd7be
+
 AI-powered movie search with natural language query translation using TMDB API.
 
 ## Features
